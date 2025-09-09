@@ -169,3 +169,7 @@ node_modules
 videos/1_visualization
 evaluation/model_outputs_cache*
 evaluation/DLC-bench
+
+.vscode*
+download.py
+data/

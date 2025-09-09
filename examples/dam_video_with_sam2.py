@@ -181,7 +181,8 @@ if __name__ == '__main__':
         torch.backends.cudnn.allow_tf32 = True
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sam2_checkpoint = "checkpoints/sam2.1_hiera_large.pt"
+    # sam2_checkpoint = "checkpoints/sam2.1_hiera_large.pt"
+    sam2_checkpoint = "/root/autodl-fs/sam2/checkpoints/sam2.1_hiera_large.pt"
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
 
