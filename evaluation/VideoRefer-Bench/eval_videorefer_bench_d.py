@@ -117,7 +117,7 @@ class VideoRefer_Bench_D(Dataset):
                 
                 # 验证 mask 是否有效
                 if mask.sum() == 0:
-                    print(f"Warning: Empty mask found for key {key} in video {video_name}")
+                    # print(f"Warning: Empty mask found for key {key} in video {video_name}")
                     # 创建一个最小的有效 mask
                     m = np.zeros_like(mask)
                     m[m.shape[0]//2, m.shape[1]//2] = 1  # 在中心放置一个像素
@@ -126,7 +126,7 @@ class VideoRefer_Bench_D(Dataset):
 
                 masks.append(mask)
 
-        indices = np.linspace(0, len(image_files)-1, 8, dtype=int)
+        indices = np.linspace(0, len(image_files)-1, 16, dtype=int)
         selected_images = [image_files[i] for i in indices]
         selected_masks = [masks[i] for i in indices]
 
@@ -181,13 +181,13 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', type=str, default='nvidia/DAM-3B-Video', help='Path to the model checkpoint')
     parser.add_argument('--video_folder', type=str, default='data/VideoRefer-Bench/Panda-70M-part', help='Directory containing video files.')
     parser.add_argument('--question-file', help='Path to the ground truth file containing question.', default='data/VideoRefer-Bench/VideoRefer-Bench-D.json')
-    parser.add_argument('--output-file', help='Directory to save the model results JSON.', default='evaluation/model_outputs_cache/DAM-3B-VideoRefer-Bench-D.json')
+    parser.add_argument('--output-file', help='Directory to save the model results JSON.', default='evaluation/model_outputs_cache/DAM-3B-VideoRefer-Bench-D-16bz.json')
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--mode", type=str, default='single')
-    parser.add_argument('--query', type=str, default='Video: <image><image><image><image><image><image><image><image>\nGiven the video in the form of a sequence of frames above, describe the object in the masked region in the video in detail.', help='Prompt for the model')
+    parser.add_argument('--query', type=str, default='Video: <image><image><image><image><image><image><image><image><image><image><image><image><image><image><image><image>\nGiven the video in the form of a sequence of frames above, describe the object in the masked region in the video in detail.', help='Prompt for the model')
     
     parser.add_argument('--prompt_mode', type=str, default='focal_prompt', help='Prompt mode')
     parser.add_argument('--conv_mode', type=str, default='v1', help='Conversation mode')
@@ -250,7 +250,7 @@ if __name__ == '__main__':
             outputs = dam.get_description(video_tensor, valid_masks, args.query, 
                                         temperature=args.temperature, top_p=args.top_p, 
                                         num_beams=1, max_new_tokens=512)
-            print(f"video_index: {i}\n")
+            # print(f"video_index: {i}\n")
         except Exception as e:
             print(f"Error processing video {video_name}: {e}")
             outputs = "Error in processing"
