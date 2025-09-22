@@ -120,9 +120,10 @@ def get_chunk(lst, n, k):
     return chunks[k]
 
 class ActivityNet_Cap_Dataset(Dataset):
-    def __init__(self, data_list, mode):
+    def __init__(self, data_list, mode, video_folder):
         self.data_list = data_list
         self.mode = mode
+        self.video_folder = video_folder
     
     def __len__(self):
         return len(self.data_list)
@@ -131,7 +132,7 @@ class ActivityNet_Cap_Dataset(Dataset):
         line = self.data_list[idx]
         video_type = line.get("type", "unknown")
         assert video_type=="video", f"Only 'video' type is supported, but got {video_type}"
-        video_path = line['image_root']
+        video_path = os.path.join(self.video_folder, line['image_root'])
         assert os.path.exists(video_path), f"Video file {video_path} does not exist."
 
         annotations = line.get("annotations", [])
@@ -157,7 +158,7 @@ def build_ActivityNet_Cap_eval(args):
     except Exception as e:
         print(f"Error reading {args.question_file}: {e}")
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
-    dataset = ActivityNet_Cap_Dataset(questions, args.mode)
+    dataset = ActivityNet_Cap_Dataset(questions, args.mode, args.video_folder)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
     return dataloader
 
@@ -170,7 +171,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Describe Anything script")
 
     parser.add_argument('--model_path', type=str, default='nvidia/DAM-3B-Video', help='Path to the model checkpoint')
-    # parser.add_argument('--video_folder', type=str, default='data/VideoRefer-Bench/Panda-70M-part', help='Directory containing video files.')
+    parser.add_argument('--video-folder', help='Path to the video file.', default='data/PAM_ActivityNetCap_Subset/frames')
     parser.add_argument('--question-file', help='Path to the ground truth file containing question.', default='data/ActivityNet-Cap-Subset/input_full_md.jsonl')
     parser.add_argument('--output-file', help='Directory to save the model results JSON.', default='evaluation/model_outputs_cache/DAM-3B-ActivityNet-Caps_Subset.json')
     parser.add_argument("--batch-size", type=int, default=1)
@@ -209,7 +210,11 @@ if __name__ == '__main__':
         prompt_mode=prompt_modes.get(args.prompt_mode, args.prompt_mode),
     ).to(device)
 
-    sam2_checkpoint = "/raid/jia_yizhen/code/sam2/checkpoints/sam2.1_hiera_large.pt"
+    import sam2
+    sam2_env_path = os.path.dirname(os.path.dirname(sam2.__file__))
+    sam2_checkpoint_path = "checkpoints/sam2.1_hiera_large.pt"
+    # sam2_checkpoint = "/raid/jia_yizhen/code/sam2/checkpoints/sam2.1_hiera_large.pt"
+    sam2_checkpoint = os.path.join(sam2_env_path, sam2_checkpoint_path)
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
 
