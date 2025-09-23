@@ -173,6 +173,7 @@ def merge_annotations(file1_path: str, file2_path: str, output_path: str) -> Non
         
         # 创建合并后的条目
         merged_entry = video_entry.copy()
+        merged_entry['image_root'] = video_name  # 确保image_root格式一致
         
         # 添加timestamps信息
         if "timestamps" in file2_entry:
@@ -193,19 +194,27 @@ def merge_annotations(file1_path: str, file2_path: str, output_path: str) -> Non
         matched_count += 1
 
         # 如果成功匹配并添加了timestamps，复制视频文件
-        video_source_path = f"data/ActivityNet_Captions/Activity_Videos/{match_key}.mp4"
         video_dest_dir = Path("data/videos")
         video_dest_dir.mkdir(parents=True, exist_ok=True)
-        video_dest_path = video_dest_dir / f"{match_key}.mp4"
         
-        try:
+        # 支持多种视频格式
+        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm']
+        video_copied = False
+        
+        for ext in video_extensions:
+            video_source_path = f"data/ActivityNet_Captions/Activity_Videos/{match_key}{ext}"
             if Path(video_source_path).exists():
+                video_dest_path = video_dest_dir / f"{match_key}{ext}"
+            try:
                 shutil.copy2(video_source_path, video_dest_path)
                 print(f"  复制视频文件: {video_source_path} -> {video_dest_path}")
-            else:
-                print(f"  警告: 源视频文件不存在: {video_source_path}")
-        except Exception as e:
-            print(f"  错误: 复制视频文件失败: {e}")
+                video_copied = True
+                break
+            except Exception as e:
+                print(f"  错误: 复制视频文件失败: {e}")
+        
+        if not video_copied:
+            print(f"  警告: 未找到视频文件 {match_key} (支持格式: {', '.join(video_extensions)})")
     
     # 保存合并后的数据
     print(f"\n保存合并结果到: {output_path}")
