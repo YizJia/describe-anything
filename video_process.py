@@ -2,11 +2,103 @@ import os
 import json
 import cv2
 import numpy as np
+from pathlib import Path
+import pycocotools.mask as maskUtils
 import torch
 from sam2.build_sam import build_sam2_video_predictor
 import sam2
 from typing import List, Dict, Any
 import argparse
+import shutil
+import tempfile
+from PIL import Image
+
+VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm']
+
+def extract_frames_from_video(video_path):
+    """Extract frames from a video file and save them to a temporary directory."""
+    temp_dir = tempfile.mkdtemp()
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Error opening video file: {video_path}")
+    
+    # 获取基本信息
+    fps = cap.get(cv2.CAP_PROP_FPS)                    # 帧率 (每秒帧数)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # 总帧数
+    # width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))        # 视频宽度
+    # height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))      # 视频高度
+    # duration = frame_count / fps if fps > 0 else 0        # 视频时长(秒)
+    
+    # 其他属性
+    # fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))            # 编码格式
+    # pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)            # 当前帧的时间戳(毫秒)
+    # pos_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES))    # 当前帧位置
+    # pos_avi_ratio = cap.get(cv2.CAP_PROP_POS_AVI_RATIO)  # 当前帧位置(相对于总帧数的比例)
+
+    frame_paths = []
+    frame_count = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_path = os.path.join(temp_dir, f"{frame_count:04d}.jpg")
+        cv2.imwrite(frame_path, frame)
+        frame_paths.append(frame_path)
+        frame_count += 1
+    
+    cap.release()
+    
+    if frame_count == 0:
+        raise ValueError("No frames were extracted from the video.")
+    
+    return frame_paths, temp_dir, fps
+
+def convert_sam2_mask_to_rle(mask):
+    """
+    将 SAM2 产生的二值 mask 转换为 RLE 格式
+    
+    Args:
+        mask: numpy array, 二值掩码 (0 或 1)，shape 为 (H, W)
+    
+    Returns:
+        dict: RLE 格式的掩码
+    """
+    # 确保 mask 是二值的 (0 或 1)
+    binary_mask = (mask > 0).astype(np.uint8)
+    
+    # 转换为 RLE 格式
+    rle = maskUtils.encode(np.asfortranarray(binary_mask))
+    
+    # 将 bytes 转换为字符串以便 JSON 序列化
+    rle['counts'] = rle['counts'].decode('utf-8')
+    
+    return rle
+
+def convert_masks_to_rle_batch(masks):
+    """
+    批量转换多个 mask 为 RLE 格式
+
+    Args:
+        masks: list of numpy arrays 或 numpy array with shape (N, H, W)
+
+    Returns:
+        list: RLE 格式的掩码列表
+    """
+    rle_masks = []
+
+    if isinstance(masks, np.ndarray) and len(masks.shape) == 3:
+        # 如果是 (N, H, W) 格式
+        for i in range(masks.shape[0]):
+            rle = convert_sam2_mask_to_rle(masks[i])
+            rle_masks.append(rle)
+    else:
+        # 如果是 mask 列表
+        for mask in masks:
+            rle = convert_sam2_mask_to_rle(mask)
+            rle_masks.append(rle)
+
+    return rle_masks
 
 def apply_sam2(image_files, points=None, box=None, normalized_coords=False):
     """Apply SAM2 to video frames using points or box on first frame"""
@@ -58,66 +150,85 @@ def apply_sam2(image_files, points=None, box=None, normalized_coords=False):
 
         # Propagate through video and collect masks
         masks = []
+        rle_masks = []
         for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
             mask = (out_mask_logits[0] > 0.0).cpu().numpy()
             masks.append(mask)
 
-    return masks
+            # convert mask to RLE
+            rle = convert_masks_to_rle_batch(mask)
+            rle_masks.append(rle)
+
+    return masks, rle_masks
 
 def load_annotations(json_file: str) -> List[Dict[str, Any]]:
     """Load video annotations from JSON file"""
-    annotations = []
     with open(json_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                annotations.append(json.loads(line))
-    return annotations
+        return json.load(f)
 
 def extract_frames_by_event(video_data: Dict[str, Any], base_path: str, output_dir: str):
     """Extract and organize frames by event"""
-    image_root = video_data["image_root"]
-    video_path = os.path.join(base_path, image_root)
+    video_root = video_data["image_root"]
+
+    for ext in VIDEO_EXTENSIONS:
+        video_name = f"{video_root}{ext}"
+        video_path = os.path.join(base_path, video_name)
+        if Path(video_path).exists():
+            # Create output directory for this video
+            video_output_dir = os.path.join(output_dir, video_root)
+            os.makedirs(video_output_dir, exist_ok=True)
+            break
     
-    # Create output directory for this video
-    video_output_dir = os.path.join(output_dir, image_root)
-    os.makedirs(video_output_dir, exist_ok=True)
-    
-    event_frames = {}
-    
-    for annotation in video_data["annotations"]:
+    event_frames = []
+
+    # First extract all frames from the video
+    all_frame_paths, temp_frame_dir, fps = extract_frames_from_video(video_path)
+
+    # Second process frames according to each event
+    for annotation, time_stamp in zip(video_data["annotations"], video_data["timestamps"]):
         event_id = annotation["event_id"]
-        frames = annotation["frames"]
+        start_time, end_time = time_stamp
+        
+        # Calculate frame indices for this event
+        start_frame_idx = int(start_time * fps)
+        end_frame_idx = int(end_time * fps)
         
         # Create event directory
         event_dir = os.path.join(video_output_dir, f"event_{event_id}")
         os.makedirs(event_dir, exist_ok=True)
         
-        # Copy frames to event directory
-        frame_paths = []
-        for frame in frames:
-            src_path = os.path.join(video_path, frame)
-            dst_path = os.path.join(event_dir, frame)
+        # Copy relevant frames to event directory
+        event_frame_paths = []
+        for frame_idx in range(start_frame_idx, min(end_frame_idx + 1, len(all_frame_paths))):
+            src_frame = all_frame_paths[frame_idx]
+            dst_frame = os.path.join(event_dir, f"frame_{frame_idx:05d}.jpg")
             
-            if os.path.exists(src_path):
-                # Copy frame
-                img = cv2.imread(src_path)
-                cv2.imwrite(dst_path, img)
-                frame_paths.append(dst_path)
+            # Copy frame to event directory
+            shutil.copy2(src_frame, dst_frame)
+            # frame = cv2.imread(src_frame)
+            # cv2.imwrite(dst_frame, frame)
+            event_frame_paths.append(dst_frame)
         
-        event_frames[event_id] = {
-            "frames": frame_paths,
-            "annotation": annotation,
-            "event_dir": event_dir
-        }
+        event_frames.append(
+            {
+                "event_id": event_id,
+                "frames": event_frame_paths,
+                "annotation": annotation,
+                "event_dir": event_dir
+            }
+        )
+
+    # Clean up temporary frames
+    shutil.rmtree(temp_frame_dir)
     
     return event_frames
 
 def process_video_segmentation(event_frames: Dict[int, Dict], args):
     """Process video segmentation for each event"""
-    results = {}
-    
-    for event_id, event_data in event_frames.items():
+    results = []
+
+    for event_data in event_frames:
+        event_id = event_data["event_id"]
         frames = event_data["frames"]
         annotation = event_data["annotation"]
         event_dir = event_data["event_dir"]
@@ -127,29 +238,35 @@ def process_video_segmentation(event_frames: Dict[int, Dict], args):
             bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
             
             # Apply SAM2 segmentation
-            masks = apply_sam2(frames, box=bbox_xyxy, normalized_coords=args.normalized_coords)
+            masks, rle_masks = apply_sam2(frames, box=bbox_xyxy, normalized_coords=args.normalized_coords)
             
             # Save masks
-            mask_dir = os.path.join(event_dir, "masks")
+            mask_dir = os.path.join(event_dir, f"event_{event_id}_masks")
             os.makedirs(mask_dir, exist_ok=True)
             
             mask_files = []
             for i, mask in enumerate(masks):
                 mask_file = os.path.join(mask_dir, f"mask_{i:05d}.png")
                 # Convert boolean mask to uint8
-                mask_img = (mask * 255).astype(np.uint8)
-                cv2.imwrite(mask_file, mask_img)
+                if len(mask.shape) > 2:
+                    mask = mask.squeeze()
+                mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+                mask_img.save(mask_file)
                 mask_files.append(mask_file)
-            
-            results[event_id] = {
-                "masks": masks,
-                "mask_files": mask_files,
-                "annotation": annotation
-            }
-    
+
+            results.append(
+                {
+                    "event_id": event_id,
+                    "masks": masks,
+                    "rle_masks": rle_masks,
+                    "mask_files": mask_files,
+                    "annotation": annotation
+                }
+            )
+
     return results
 
-def save_rel_format(video_data: Dict[str, Any], segmentation_results: Dict, output_file: str):
+def save_rel_format(video_data: Dict[str, Any], event_frames: List[Dict], segmentation_results: List[Dict]):
     """Save results in REL format"""
     rel_data = {
         "type": video_data["type"],
@@ -157,29 +274,26 @@ def save_rel_format(video_data: Dict[str, Any], segmentation_results: Dict, outp
         "annotations": []
     }
     
-    for annotation in video_data["annotations"]:
-        event_id = annotation["event_id"]
-        
-        new_annotation = annotation.copy()
-        
-        if event_id in segmentation_results:
-            # Add mask information
-            new_annotation["mask_files"] = segmentation_results[event_id]["mask_files"]
-            new_annotation["has_segmentation"] = True
-        else:
-            new_annotation["has_segmentation"] = False
+    ori_annotations = video_data["annotations"]
+    for ori_anno, event_frame, segmentation_result in zip(ori_annotations, event_frames, segmentation_results):
+        assert ori_anno["event_id"] == event_frame["event_id"], "Event ID mismatch"
+        assert ori_anno["event_id"] == segmentation_result["event_id"], "Event ID mismatch"
+
+        event_id = ori_anno["event_id"]
+
+        new_annotation = ori_anno.copy()
+        new_annotation["frames"] = event_frame["frames"]
+        new_annotation["segmentation"] = segmentation_result["rle_masks"]
         
         rel_data["annotations"].append(new_annotation)
-    
-    # Save to file
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(rel_data, f, ensure_ascii=False, indent=2)
+
+    return rel_data
 
 def main():
     parser = argparse.ArgumentParser(description="Process video data with segmentation")
-    parser.add_argument("--json_file", required=True, help="Path to JSON annotation file")
-    parser.add_argument("--base_path", required=True, help="Base path for video frames")
-    parser.add_argument("--output_dir", required=True, help="Output directory for processed data")
+    parser.add_argument("--json_file", help="Path to JSON annotation file", default="data/merged_output.json")
+    parser.add_argument("--base_path", help="Base path for video frames", default='data/PAM_ActivityNetCap_Subset/videos')
+    parser.add_argument("--output_dir", help="Output directory for processed data", default='data/processed')
     parser.add_argument("--normalized_coords", action="store_true", help="Whether coordinates are normalized")
     parser.add_argument("--device", default="cuda", help="Device for SAM2")
     
@@ -197,9 +311,13 @@ def main():
     
     # Load annotations
     annotations = load_annotations(args.json_file)
+
+    new_annotations = []
     
     # Process each video
-    for video_data in annotations:
+    # for video_data in annotations:
+    for i in range(2):
+        video_data = annotations[i]
         print(f"Processing video: {video_data['image_root']}")
         
         # Extract frames by event
@@ -209,10 +327,14 @@ def main():
         segmentation_results = process_video_segmentation(event_frames, args)
         
         # Save results in REL format
-        output_file = os.path.join(args.output_dir, f"{video_data['image_root']}_rel.json")
-        save_rel_format(video_data, segmentation_results, output_file)
-        
+        new_entry = save_rel_format(video_data, event_frames, segmentation_results)
+        new_annotations.append(new_entry)
+
         print(f"Completed processing: {video_data['image_root']}")
+
+    # Save all new annotations
+    with open(os.path.join(args.output_dir, "new_annotations_masks.json"), 'w', encoding='utf-8') as f:
+        json.dump(new_annotations, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
     main()
