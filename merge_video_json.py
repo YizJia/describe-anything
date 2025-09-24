@@ -202,7 +202,7 @@ def merge_annotations(file1_path: str, file2_path: str, output_path: str) -> Non
         video_copied = False
         
         for ext in video_extensions:
-            video_source_path = f"data/ActivityNet_Captions/Activity_Videos/{match_key}{ext}"
+            video_source_path = f"data/ANet/train_val/{match_key}{ext}"
             if Path(video_source_path).exists():
                 video_dest_path = video_dest_dir / f"{match_key}{ext}"
             try:

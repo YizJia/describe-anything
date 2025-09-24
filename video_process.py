@@ -181,10 +181,13 @@ def extract_frames_by_event(video_data: Dict[str, Any], base_path: str, output_d
     
     event_frames = []
 
-    # First extract all frames from the video
+    # First. extract all frames from the video
     all_frame_paths, temp_frame_dir, fps = extract_frames_from_video(video_path)
+    print(f"Extracted {len(all_frame_paths)} frames from {video_path} at {fps} FPS.")
 
-    # Second process frames according to each event
+    sample_interval = 10  # You can adjust this value to sample frames at different intervals
+    seg_frames = {}
+    # Second. process frames according to each event
     for annotation, time_stamp in zip(video_data["annotations"], video_data["timestamps"]):
         event_id = annotation["event_id"]
         start_time, end_time = time_stamp
@@ -200,14 +203,15 @@ def extract_frames_by_event(video_data: Dict[str, Any], base_path: str, output_d
         # Copy relevant frames to event directory
         event_frame_paths = []
         for frame_idx in range(start_frame_idx, min(end_frame_idx + 1, len(all_frame_paths))):
-            src_frame = all_frame_paths[frame_idx]
-            dst_frame = os.path.join(event_dir, f"frame_{frame_idx:05d}.jpg")
-            
-            # Copy frame to event directory
-            shutil.copy2(src_frame, dst_frame)
-            # frame = cv2.imread(src_frame)
-            # cv2.imwrite(dst_frame, frame)
-            event_frame_paths.append(dst_frame)
+            if (frame_idx - start_frame_idx) % sample_interval == 0 or frame_idx+1 == min(end_frame_idx + 1, len(all_frame_paths)):
+                src_frame = all_frame_paths[frame_idx]
+                dst_frame = os.path.join(event_dir, f"frame_{frame_idx:05d}.jpg")
+                
+                # Copy frame to event directory
+                shutil.copy2(src_frame, dst_frame)
+                event_frame_paths.append(dst_frame)
+
+                seg_frames[frame_idx] = src_frame
         
         event_frames.append(
             {
@@ -217,56 +221,84 @@ def extract_frames_by_event(video_data: Dict[str, Any], base_path: str, output_d
                 "event_dir": event_dir
             }
         )
+    
+    # Third. segment each frames according to the first bbox in annotation
+    event_segmentations = []
+
+    bbox = video_data["annotations"][0].get("box", None)
+    assert bbox is not None, "No bbox found in the first annotation"
+    # Remove duplicates and sort the seg_frames list
+    seg_input_frames = list(seg_frames.values())
+    seg_input_frames = sorted(list(set(seg_input_frames)))
+    mask_files, rle_masks = process_video_segmentation(seg_input_frames, bbox[0], temp_frame_dir)
+    
+    # Fourth. assign masks to each event
+    for annotation, time_stamp in zip(video_data["annotations"], video_data["timestamps"]):
+        event_id = annotation["event_id"]
+        start_time, end_time = time_stamp
+        
+        # Calculate frame indices for this event
+        start_frame_idx = int(start_time * fps)
+        end_frame_idx = int(end_time * fps)
+        
+        # Create event mask directory
+        event_mask_dir = os.path.join(video_output_dir, f"event_{event_id}_masks")
+        os.makedirs(event_mask_dir, exist_ok=True)
+        
+        # Copy relevant frames to event directory
+        event_mask_paths = []
+        for frame_idx in range(start_frame_idx, min(end_frame_idx + 1, len(all_frame_paths))):
+            if (frame_idx - start_frame_idx) % sample_interval == 0 or frame_idx+1 == min(end_frame_idx + 1, len(all_frame_paths)):
+                ind_frame = seg_frames.get(frame_idx, None)
+                assert ind_frame is not None, f"No source frame found for index {frame_idx}"
+
+                src_frame = mask_files[os.path.basename(ind_frame)]
+                dst_frame = os.path.join(event_mask_dir, f"frame_{frame_idx:05d}_mask.png")
+                
+                # Copy frame to event directory
+                shutil.copy2(src_frame, dst_frame)
+                event_mask_paths.append(dst_frame)
+
+        event_segmentations.append(
+            {
+                "event_id": event_id,
+                "rle_masks": rle_masks,
+                "mask_files": event_mask_paths,
+            }
+        )
 
     # Clean up temporary frames
     shutil.rmtree(temp_frame_dir)
     
-    return event_frames
+    return event_frames, event_segmentations
 
-def process_video_segmentation(event_frames: Dict[int, Dict], args):
-    """Process video segmentation for each event"""
+def process_video_segmentation(frames: List[str], bbox: List[float], frame_root: str):
+    """Process video segmentation for each frames"""
     results = []
+    
+    bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
 
-    for event_data in event_frames:
-        event_id = event_data["event_id"]
-        frames = event_data["frames"]
-        annotation = event_data["annotation"]
-        event_dir = event_data["event_dir"]
-        
-        if "box" in annotation and annotation["box"]:
-            bbox = annotation["box"][0]  # Take first box
-            bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
-            
-            # Apply SAM2 segmentation
-            masks, rle_masks = apply_sam2(frames, box=bbox_xyxy, normalized_coords=args.normalized_coords)
-            
-            # Save masks
-            mask_dir = os.path.join(event_dir, f"event_{event_id}_masks")
-            os.makedirs(mask_dir, exist_ok=True)
-            
-            mask_files = []
-            for i, mask in enumerate(masks):
-                mask_file = os.path.join(mask_dir, f"mask_{i:05d}.png")
-                # Convert boolean mask to uint8
-                if len(mask.shape) > 2:
-                    mask = mask.squeeze()
-                mask_img = Image.fromarray((mask * 255).astype(np.uint8))
-                mask_img.save(mask_file)
-                mask_files.append(mask_file)
+    # Apply SAM2 segmentation
+    masks, rle_masks = apply_sam2(frames, box=bbox_xyxy)
+    assert len(masks) == len(frames), "Number of masks should match number of frames"
 
-            results.append(
-                {
-                    "event_id": event_id,
-                    "masks": masks,
-                    "rle_masks": rle_masks,
-                    "mask_files": mask_files,
-                    "annotation": annotation
-                }
-            )
+    mask_dir = os.path.join(frame_root, "masks")
+    os.makedirs(mask_dir, exist_ok=True)
+    mask_files = {}
 
-    return results
+    for (mask, frame) in zip(masks, frames):
+        # mask_file = os.path.join(mask_dir, f"mask_{i:05d}.png")
+        mask_file = os.path.join(mask_dir, os.path.basename(frame))
+        # Convert boolean mask to uint8
+        if len(mask.shape) > 2:
+            mask = mask.squeeze()
+        mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+        mask_img.save(mask_file)
+        mask_files[os.path.basename(frame)] = mask_file
 
-def save_rel_format(video_data: Dict[str, Any], event_frames: List[Dict], segmentation_results: List[Dict]):
+    return mask_files, rle_masks
+
+def save_rel_format(video_root: str, video_data: Dict[str, Any], event_frames: List[Dict], event_segmentations: List[Dict]):
     """Save results in REL format"""
     rel_data = {
         "type": video_data["type"],
@@ -275,15 +307,13 @@ def save_rel_format(video_data: Dict[str, Any], event_frames: List[Dict], segmen
     }
     
     ori_annotations = video_data["annotations"]
-    for ori_anno, event_frame, segmentation_result in zip(ori_annotations, event_frames, segmentation_results):
+    for ori_anno, event_frame, event_seg in zip(ori_annotations, event_frames, event_segmentations):
         assert ori_anno["event_id"] == event_frame["event_id"], "Event ID mismatch"
-        assert ori_anno["event_id"] == segmentation_result["event_id"], "Event ID mismatch"
-
-        event_id = ori_anno["event_id"]
+        assert ori_anno["event_id"] == event_seg["event_id"], "Event ID mismatch"
 
         new_annotation = ori_anno.copy()
-        new_annotation["frames"] = event_frame["frames"]
-        new_annotation["segmentation"] = segmentation_result["rle_masks"]
+        new_annotation["frames"] = [str(Path(frame).relative_to(Path(video_root))) for frame in event_frame["frames"]]
+        new_annotation["segmentations"] = event_seg["rle_masks"]
         
         rel_data["annotations"].append(new_annotation)
 
@@ -315,22 +345,21 @@ def main():
     new_annotations = []
     
     # Process each video
-    # for video_data in annotations:
-    for i in range(2):
-        video_data = annotations[i]
-        print(f"Processing video: {video_data['image_root']}")
+    for video_data in annotations:
+    # for i in range(1):
+        # video_data = annotations[i]
+        video_root = video_data["image_root"]
+        print(f"Processing video: {video_root}")
         
-        # Extract frames by event
-        event_frames = extract_frames_by_event(video_data, args.base_path, args.output_dir)
         
-        # Process segmentation
-        segmentation_results = process_video_segmentation(event_frames, args)
+        # Extract frames and segmentations by event
+        event_frames, event_segmentations = extract_frames_by_event(video_data, args.base_path, args.output_dir)
         
         # Save results in REL format
-        new_entry = save_rel_format(video_data, event_frames, segmentation_results)
+        new_entry = save_rel_format(args.output_dir, video_data, event_frames, event_segmentations)
         new_annotations.append(new_entry)
 
-        print(f"Completed processing: {video_data['image_root']}")
+        print(f"Completed processing: {video_root}")
 
     # Save all new annotations
     with open(os.path.join(args.output_dir, "new_annotations_masks.json"), 'w', encoding='utf-8') as f:
