@@ -172,14 +172,21 @@ if __name__ == '__main__':
 
     parser.add_argument('--model_path', type=str, default='nvidia/DAM-3B-Video', help='Path to the model checkpoint')
     parser.add_argument('--video-folder', help='Path to the video file.', default='data/PAM_ActivityNetCap_Subset/frames')
-    parser.add_argument('--question-file', help='Path to the ground truth file containing question.', default='data/ActivityNet-Cap-Subset/input_full_md.jsonl')
-    parser.add_argument('--output-file', help='Directory to save the model results JSON.', default='evaluation/model_outputs_cache/DAM-3B-ActivityNet-Caps_Subset.json')
+    parser.add_argument('--question-file', help='Path to the ground truth file containing question.', default='data/PAM_ActivityNetCap_Subset/input_full_md.jsonl')
+    parser.add_argument('--output-file', help='Directory to save the model results JSON.', default='evaluation/model_outputs_cache/DAM-3B-ActivityNet-Caps_Subset_shortdes_v4.json')
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--mode", type=str, default='single')
-    parser.add_argument('--query', type=str, default='\nGiven the video in the form of a sequence of frames above, describe the object in the masked region in the video in detail.', help='Prompt for the model')
+    # parser.add_argument('--query', type=str, default='\nGiven the video in the form of a sequence of frames above, describe the object in the masked region in the video in one or two sentences.', help='Prompt for the model')
+    # replace the questions
+    # v1
+    # parser.add_argument('--query', type=str, default='\nGiven the video in the form of a sequence of frames above, summarize the activity of the object in the masked region in one short sentence.', help='Prompt for the model')
+    # v2
+    # parser.add_argument('--query', type=str, default='\nGiven the video in the form of a sequence of frames above, generate a brief caption for the activity of the object in the masked region.', help='Prompt for the model')
+    # v3
+    parser.add_argument('--query', type=str, default='\nGiven the video in the form of a sequence of frames above, summarize the activity for this subject in about 20 words.', help='Prompt for the model')
     
     parser.add_argument('--prompt_mode', type=str, default='focal_prompt', help='Prompt mode')
     parser.add_argument('--conv_mode', type=str, default='v1', help='Conversation mode')
